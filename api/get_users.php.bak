@@ -1,0 +1,88 @@
+<?php
+ob_start(); // Start output buffering at the very top
+ini_set('display_errors', 0); // Do not display errors to the browser for API calls
+error_reporting(E_ALL); // Report all errors (to logs)
+
+session_start();
+require_once '../includes/db_connect.php';
+require_once '../includes/functions.php';
+require_once 'fix_json.php';
+
+// header('Content-Type: application/json'); // Moved to just before echo
+
+if (!isLoggedIn()) {
+    sendJsonResponse(['success' => false, 'message' => 'Yetkisiz erişim. Lütfen giriş yapın.']);
+}
+
+// Session değişkenlerinin varlığını kontrol et
+if (!isset($_SESSION['user_id'])) {
+    error_log('API Hatası: user_id session değişkeni get_users.php içinde eksik.');
+    sendJsonResponse(['success' => false, 'message' => 'Oturum bilgileri eksik. Lütfen tekrar giriş yapın.']);
+}
+
+$currentUserId = $_SESSION['user_id'];
+$currentUserRole = isset($_SESSION['role_name']) ? $_SESSION['role_name'] : null;
+
+// Eğer role_name yoksa, veritabanından almayı dene
+if (empty($currentUserRole) && $currentUserId) {
+    $currentUserRole = getRoleNameByUserId($pdo, $currentUserId);
+    if ($currentUserRole) {
+        $_SESSION['role_name'] = $currentUserRole; // Session'a ekle
+    } else {
+        error_log('API Hatası: user_id ' . $currentUserId . ' için role_name çekilemedi.');
+        sendJsonResponse(['success' => false, 'message' => 'Kullanıcı rolü bulunamadı. Lütfen tekrar giriş yapın.']);
+    }
+}
+
+try {
+    // Tüm kullanıcıları ve rollerini çek, mevcut kullanıcı hariç
+    $sql = "SELECT u.id, u.username, u.email, u.is_online, r.name as role_name
+            FROM users u
+            JOIN roles r ON u.role_id = r.id
+            WHERE u.id != :current_user_id";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindParam(':current_user_id', $currentUserId, PDO::PARAM_INT);
+    $stmt->execute();
+    $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $filteredUsers = [];
+    if ($currentUserRole === 'visitor') {
+        foreach ($users as $user) {
+            if ($user['role_name'] === 'teacher' || $user['role_name'] === 'admin') {
+                $filteredUsers[] = $user;
+            }
+        }
+    } else if ($currentUserRole === 'student') {
+        // Öğrenciler herkesi görebilir (ama sadece öğretmen/admin ile sohbet edebilir JS tarafında kontrol edilecek)
+        // VEYA öğrenciler sadece öğretmen ve adminleri görebilir şeklinde kısıtlanabilir.
+        // Proje gereksinimine göre burası ayarlanabilir. Şimdilik herkesi görmesine izin verelim.
+        // Ama script.js tarafında sadece öğretmen/adminlerle konuşma başlatabilecek.
+        // Daha güvenli olması için burada da filtreleme yapılabilir:
+        /*
+        foreach ($users as $user) {
+            if ($user['role_name'] === 'teacher' || $user['role_name'] === 'admin') {
+                $filteredUsers[] = $user;
+            }
+        }
+        */
+        $filteredUsers = $users; // Şimdilik tümünü göster
+    } else {
+        // Öğretmenler ve Adminler herkesi görebilir
+        $filteredUsers = $users;
+    }
+
+    sendJsonResponse(['success' => true, 'data' => $filteredUsers]);
+
+} catch (PDOException $e) {
+    error_log("Get Users Error: " . $e->getMessage());
+    sendJsonResponse(['success' => false, 'message' => 'Kullanıcılar yüklenirken bir veritabanı hatası oluştu: ' . $e->getMessage()]);
+}
+
+// JSON yanıtını gönder ve çık
+function sendJsonResponse($data) {
+    ob_end_clean(); // Tüm buffer içeriğini temizle
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
